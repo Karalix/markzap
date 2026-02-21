@@ -1,0 +1,13 @@
+[package]
+name = "markzap"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui = "0.2.2"
+gpui-component = { version = "0.5.1", features = ["webview"] }
+gpui-component-assets = "0.5.1"
+comrak = "0.36"
+anyhow = "1"
+rust-embed = "8"
+wry = { version = "0.53.3", package = "lb-wry" }
