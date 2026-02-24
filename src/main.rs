@@ -93,17 +93,24 @@ fn open_window(
         )
         .ok()?;
 
-    // Quit the app when the window is closed
+    let view = app_view.borrow_mut().take()?;
+
+    // Quit the app only when the last window is closed, and flush pending saves
+    let view_for_close = view.clone();
     window_handle
         .update(cx, |_, window, cx| {
-            window.on_window_should_close(cx, |_, cx| {
-                cx.quit();
+            window.on_window_should_close(cx, move |_, cx| {
+                view_for_close.update(cx, |this, _cx| {
+                    this.save_to_file();
+                });
+                // Count remaining windows (including this one, which hasn't closed yet)
+                if cx.windows().len() <= 1 {
+                    cx.quit();
+                }
                 true
             });
         })
         .ok();
-
-    let view = app_view.borrow_mut().take()?;
     Some((window_handle.into(), view))
 }
 
@@ -122,6 +129,7 @@ fn main() {
 
     // Register the open-urls handler BEFORE run().
     // This captures file:// URLs from macOS document open events.
+    // URLs are buffered and picked up either at launch or by a polling timer.
     app.on_open_urls(move |urls: Vec<String>| {
         pending_for_callback.borrow_mut().extend(urls);
     });
@@ -171,29 +179,53 @@ fn main() {
             open_window(content, None, cx)
         };
 
-        if let Some((window_handle, app_view)) = result {
-            cx.on_action(move |_: &OpenFile, cx| {
-                let receiver = cx.prompt_for_paths(PathPromptOptions {
-                    files: true,
-                    directories: false,
-                    multiple: false,
-                    prompt: None,
-                });
-                let app_view = app_view.clone();
-                cx.spawn(async move |cx| {
-                    if let Ok(Ok(Some(paths))) = receiver.await {
-                        if let Some(path) = paths.into_iter().next() {
-                            cx.update_window(window_handle, |_, window, cx| {
-                                app_view.update(cx, |view, cx| {
-                                    view.open_file(path, window, cx);
-                                });
+        // Register the OpenFile action (Cmd-O) — opens file in a new window
+        cx.on_action(move |_: &OpenFile, cx| {
+            let receiver = cx.prompt_for_paths(PathPromptOptions {
+                files: true,
+                directories: false,
+                multiple: false,
+                prompt: None,
+            });
+            cx.spawn(async move |cx| {
+                if let Ok(Ok(Some(paths))) = receiver.await {
+                    if let Some(path) = paths.into_iter().next() {
+                        cx.update(|cx| {
+                            let content = load_file(&path);
+                            open_window(content, Some(path), cx);
+                        })
+                        .ok();
+                    }
+                }
+            })
+            .detach();
+        });
+
+        // Poll for new open-url events that arrive after launch.
+        // macOS on_open_urls doesn't give us access to cx, so we poll the buffer.
+        let pending_urls_poll = pending_urls.clone();
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                let urls: Vec<String> = pending_urls_poll.borrow_mut().drain(..).collect();
+                if !urls.is_empty() {
+                    for url in urls {
+                        if let Some(path) = url_to_path(&url) {
+                            let content = load_file(&path);
+                            cx.update(|cx| {
+                                open_window(content, Some(path), cx);
                             })
                             .ok();
                         }
                     }
-                })
-                .detach();
-            });
-        }
+                }
+            }
+        })
+        .detach();
+
+        // Ignore the result — we no longer tie actions to a single window
+        let _ = result;
     });
 }

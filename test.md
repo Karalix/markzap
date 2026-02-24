@@ -1,5 +1,7 @@
 # MarkZap Test Document
 
+On va ajouter une image : ![image de moi](https://krlx.fr/profil.jpg)
+
 ## Introduction
 
 This is a **test document** for MarkZap, a fast Markdown viewer and editor built with *Rust* and *GPUI*.

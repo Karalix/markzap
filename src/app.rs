@@ -1,14 +1,15 @@
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
-use gpui::*;
+use gpui::{self, *};
 use gpui_component::ActiveTheme as _;
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::switch::Switch;
 use gpui_component::text::TextView;
-use gpui_component::{Icon, IconName};
+use gpui_component::{Icon, IconName, Sizable as _};
 use gpui_component::{h_flex, v_flex};
 
 use crate::assets::AppIconName;
@@ -22,7 +23,9 @@ pub struct AppView {
     file_path: Option<PathBuf>,
     editor_state: Option<Entity<InputState>>,
     has_presentation: bool,
+    dirty: bool,
     _subscription: Option<Subscription>,
+    save_debounce: u64,
 }
 
 impl AppView {
@@ -34,7 +37,9 @@ impl AppView {
             file_path,
             editor_state: None,
             has_presentation,
+            dirty: false,
             _subscription: None,
+            save_debounce: 0,
         }
     }
 
@@ -50,7 +55,7 @@ impl AppView {
                 .default_value(&self.content)
         });
 
-        // Subscribe to text changes to keep self.content in sync and save to file
+        // Subscribe to text changes to keep self.content in sync and debounce save to file
         let subscription = cx.subscribe(
             &state,
             |this: &mut Self, _entity, event: &InputEvent, cx| {
@@ -58,8 +63,29 @@ impl AppView {
                     if let Some(ref state) = this.editor_state {
                         this.content = state.read(cx).value().to_string();
                         this.has_presentation = slidev::detect_presentation(&this.content);
-                        this.save_to_file();
                         cx.notify();
+
+                        // Debounce save: increment generation counter and schedule a save
+                        this.dirty = true;
+                        this.save_debounce += 1;
+                        let generation = this.save_debounce;
+                        let entity = cx.entity().clone();
+                        cx.spawn(async move |_, cx| {
+                            cx.background_executor()
+                                .timer(Duration::from_secs(2))
+                                .await;
+                            cx.update(|cx| {
+                                entity.update(cx, |this, cx| {
+                                    if this.save_debounce == generation {
+                                        this.save_to_file();
+                                        this.dirty = false;
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                            .ok();
+                        })
+                        .detach();
                     }
                 }
             },
@@ -71,7 +97,7 @@ impl AppView {
     }
 
     /// Save current content to the source file, if one is associated.
-    fn save_to_file(&self) {
+    pub fn save_to_file(&self) {
         if let Some(ref path) = self.file_path {
             if let Err(e) = fs::write(path, &self.content) {
                 eprintln!("Error saving file {:?}: {}", path, e);
@@ -80,32 +106,13 @@ impl AppView {
     }
 
     /// Sync editor content into self.content when switching away from edit mode.
+    /// Also saves immediately (flush any pending debounced save).
     fn sync_content_from_editor(&mut self, cx: &Context<Self>) {
         if let Some(ref state) = self.editor_state {
             self.content = state.read(cx).value().to_string();
             self.has_presentation = slidev::detect_presentation(&self.content);
+            self.save_to_file();
         }
-    }
-
-    /// Replace the current document with the contents of the given file path.
-    pub fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let content = fs::read_to_string(&path).unwrap_or_else(|e| {
-            format!(
-                "# Error\n\nCould not read `{}`:\n\n```\n{}\n```",
-                path.display(),
-                e
-            )
-        });
-        self.content = content;
-        self.file_path = Some(path.clone());
-        self.has_presentation = slidev::detect_presentation(&self.content);
-        self.editor_state = None;
-        self._subscription = None;
-        self.mode = AppMode::Preview;
-        if let Some(name) = path.file_name() {
-            window.set_window_title(&format!("MarkZap \u{2014} {}", name.to_string_lossy()));
-        }
-        cx.notify();
     }
 }
 
@@ -113,6 +120,7 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_edit = self.mode == AppMode::Edit;
         let has_presentation = self.has_presentation;
+        let dirty = self.dirty;
 
         // Build the content area depending on mode
         let content_area = if is_edit {
@@ -157,8 +165,25 @@ impl Render for AppView {
                     .justify_between()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    // Left spacer (for centering the switch)
-                    .child(h_flex().w(px(150.)))
+                    // Left: saving indicator (or spacer for centering the switch)
+                    .child(
+                        h_flex().w(px(150.)).when(dirty, |this| {
+                            this.child(
+                                Icon::new(IconName::LoaderCircle)
+                                    .small()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .with_animation(
+                                        "saving-spinner",
+                                        Animation::new(Duration::from_secs(1))
+                                            .repeat()
+                                            .with_easing(linear),
+                                        |icon, delta| {
+                                            icon.rotate(Radians(delta * std::f32::consts::TAU))
+                                        },
+                                    ),
+                            )
+                        }),
+                    )
                     // Center: mode switch
                     .child(
                         h_flex()
