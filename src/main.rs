@@ -9,11 +9,13 @@ use gpui_component::Root;
 
 mod app;
 mod assets;
+mod http;
+mod search;
 mod slidev;
 mod state;
 mod views;
 
-actions!(markzap, [OpenFile, Quit]);
+actions!(markzap, [OpenFile, Quit, ToggleSearch]);
 
 /// Convert a file:// URL string to a PathBuf.
 fn url_to_path(url: &str) -> Option<PathBuf> {
@@ -125,7 +127,9 @@ fn main() {
     let pending_urls: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let pending_for_callback = pending_urls.clone();
 
-    let app = Application::new().with_assets(assets::Assets);
+    let app = Application::new()
+        .with_assets(assets::Assets)
+        .with_http_client(http::SimpleHttpClient::new());
 
     // Register the open-urls handler BEFORE run().
     // This captures file:// URLs from macOS document open events.
@@ -149,6 +153,9 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("cmd-o", OpenFile, None),
             KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-f", ToggleSearch, None),
+            KeyBinding::new("shift-enter", app::PrevMatch, Some("SearchBar")),
+            KeyBinding::new("escape", app::CloseSearch, Some("SearchBar")),
         ]);
 
         cx.on_action(|_: &Quit, cx| {

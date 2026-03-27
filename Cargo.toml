@@ -11,3 +11,6 @@ comrak = "0.36"
 anyhow = "1"
 rust-embed = "8"
 wry = { version = "0.53.3", package = "lb-wry" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+futures = "0.3"
