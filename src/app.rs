@@ -8,18 +8,15 @@ use gpui_component::ActiveTheme as _;
 use gpui_component::button::Button;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::switch::Switch;
-use gpui_component::text::TextView;
-use gpui_component::{Icon, IconName, Selectable as _, Sizable as _};
+use gpui_component::webview::WebView;
+use gpui_component::{Icon, IconName, Sizable as _};
 use gpui_component::{h_flex, v_flex};
 
-use crate::ToggleSearch;
 use crate::assets::AppIconName;
-use crate::search::SearchState;
+use crate::render;
 use crate::slidev;
 use crate::state::AppMode;
 use crate::views::presentation;
-
-actions!(search, [NextMatch, PrevMatch, CloseSearch]);
 
 pub struct AppView {
     mode: AppMode,
@@ -29,10 +26,8 @@ pub struct AppView {
     has_presentation: bool,
     dirty: bool,
     _subscription: Option<Subscription>,
-    _search_subscription: Option<Subscription>,
     save_debounce: u64,
-    search: Option<SearchState>,
-    preview_scroll: ScrollHandle,
+    preview_webview: Option<Entity<WebView>>,
 }
 
 impl AppView {
@@ -46,10 +41,8 @@ impl AppView {
             has_presentation,
             dirty: false,
             _subscription: None,
-            _search_subscription: None,
             save_debounce: 0,
-            search: None,
-            preview_scroll: ScrollHandle::new(),
+            preview_webview: None,
         }
     }
 
@@ -104,6 +97,37 @@ impl AppView {
         state
     }
 
+    /// Lazily create the preview WebView, loading the current content as HTML.
+    fn ensure_preview_webview(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<WebView> {
+        if let Some(ref wv) = self.preview_webview {
+            return wv.clone();
+        }
+
+        let html = render::render_markdown_page(&self.content, cx.theme().is_dark());
+        let wry_webview = wry::WebViewBuilder::new()
+            .with_html(&html)
+            .build_as_child(window)
+            .expect("Failed to create preview WebView");
+
+        let entity = cx.new(|cx| WebView::new(wry_webview, window, cx));
+        self.preview_webview = Some(entity.clone());
+        entity
+    }
+
+    /// Regenerate the HTML from the current content and reload it in the
+    /// preview WebView (if it exists), then make it visible.
+    fn refresh_preview(&self, cx: &mut Context<Self>) {
+        if let Some(ref wv) = self.preview_webview {
+            let html = render::render_markdown_page(&self.content, cx.theme().is_dark());
+            wv.read(cx).load_html(&html).ok();
+            wv.update(cx, |w, _| w.show());
+        }
+    }
+
     /// Save current content to the source file, if one is associated.
     pub fn save_to_file(&self) {
         if let Some(ref path) = self.file_path {
@@ -122,54 +146,6 @@ impl AppView {
             self.save_to_file();
         }
     }
-
-    /// Lazily create the search state on first Cmd+F.
-    fn ensure_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search.is_some() {
-            return;
-        }
-
-        let search = SearchState::new(window, cx);
-
-        let subscription = cx.subscribe(
-            &search.input_state,
-            |this: &mut Self, _entity, event: &InputEvent, cx| {
-                match event {
-                    InputEvent::Change => {
-                        if let Some(ref mut search) = this.search {
-                            search.query = search.input_state.read(cx).value().to_string();
-                            search.find_matches(&this.content);
-                            search.current_index = 0;
-                            cx.notify();
-                        }
-                    }
-                    InputEvent::PressEnter { .. } => {
-                        if let Some(ref mut search) = this.search {
-                            search.next_match();
-                            cx.notify();
-                        }
-                        this.scroll_to_current_match();
-                    }
-                    _ => {}
-                }
-            },
-        );
-
-        self.search = Some(search);
-        self._search_subscription = Some(subscription);
-    }
-
-    /// Scroll the preview to the current search match using proportional estimation.
-    fn scroll_to_current_match(&self) {
-        let content_len = self.content.len();
-        if let Some(ref search) = self.search {
-            if let Some(ratio) = search.current_match_ratio(content_len) {
-                let max = self.preview_scroll.max_offset();
-                let y = -max.height * ratio;
-                self.preview_scroll.set_offset(point(px(0.), y));
-            }
-        }
-    }
 }
 
 impl Render for AppView {
@@ -177,13 +153,6 @@ impl Render for AppView {
         let is_edit = self.mode == AppMode::Edit;
         let has_presentation = self.has_presentation;
         let dirty = self.dirty;
-
-        // Search bar visible?
-        let search_visible = !is_edit
-            && self
-                .search
-                .as_ref()
-                .map_or(false, |s| s.is_visible);
 
         // Build the content area depending on mode
         let content_area = if is_edit {
@@ -200,161 +169,12 @@ impl Render for AppView {
                 )
                 .into_any_element()
         } else {
-            let preview_content = if search_visible {
-                self.search.as_ref().unwrap().highlighted_content(&self.content)
-            } else {
-                self.content.clone()
-            };
-
+            let wv = self.ensure_preview_webview(window, cx);
             div()
-                .id("preview-scroll")
                 .flex_1()
                 .size_full()
-                .overflow_y_scroll()
-                .track_scroll(&self.preview_scroll)
-                .child(
-                    div().p_4().child(
-                        TextView::markdown("md-preview", preview_content, window, cx)
-                            .scrollable(false)
-                            .selectable(true),
-                    ),
-                )
+                .child(wv.clone())
                 .into_any_element()
-        };
-
-        let search_bar = if search_visible {
-            let search = self.search.as_ref().unwrap();
-            let matches_count = search.matches_count();
-            let current_index = search.current_index;
-            let case_sensitive = search.case_sensitive;
-            let indicator = if matches_count > 0 {
-                format!("{}/{}", current_index + 1, matches_count)
-            } else if search.query.is_empty() {
-                String::new()
-            } else {
-                "0/0".to_string()
-            };
-
-            let view = cx.entity().clone();
-            let view2 = cx.entity().clone();
-            let view3 = cx.entity().clone();
-            let view4 = cx.entity().clone();
-
-            Some(
-                h_flex()
-                    .id("search-bar")
-                    .key_context("SearchBar")
-                    .w_full()
-                    .h(px(40.))
-                    .px_4()
-                    .gap_2()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().background)
-                    .on_action(cx.listener(|this, _: &NextMatch, _window, cx| {
-                        if let Some(ref mut search) = this.search {
-                            search.next_match();
-                            cx.notify();
-                        }
-                        this.scroll_to_current_match();
-                    }))
-                    .on_action(cx.listener(|this, _: &PrevMatch, _window, cx| {
-                        if let Some(ref mut search) = this.search {
-                            search.prev_match();
-                            cx.notify();
-                        }
-                        this.scroll_to_current_match();
-                    }))
-                    .on_action(cx.listener(|this, _: &CloseSearch, _window, cx| {
-                        if let Some(ref mut search) = this.search {
-                            search.is_visible = false;
-                            cx.notify();
-                        }
-                    }))
-                    // Search icon
-                    .child(
-                        Icon::new(IconName::Search)
-                            .small()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    // Search input
-                    .child(
-                        Input::new(&search.input_state)
-                            .w(px(240.))
-                            .small(),
-                    )
-                    // Match count indicator
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .min_w(px(40.))
-                            .child(indicator),
-                    )
-                    // Prev match button
-                    .child(
-                        Button::new("search-prev")
-                            .icon(IconName::ArrowUp)
-                            .small()
-                            .on_click(move |_ev, _window, cx| {
-                                view.update(cx, |this, cx| {
-                                    if let Some(ref mut search) = this.search {
-                                        search.prev_match();
-                                        cx.notify();
-                                    }
-                                    this.scroll_to_current_match();
-                                });
-                            }),
-                    )
-                    // Next match button
-                    .child(
-                        Button::new("search-next")
-                            .icon(IconName::ArrowDown)
-                            .small()
-                            .on_click(move |_ev, _window, cx| {
-                                view2.update(cx, |this, cx| {
-                                    if let Some(ref mut search) = this.search {
-                                        search.next_match();
-                                        cx.notify();
-                                    }
-                                    this.scroll_to_current_match();
-                                });
-                            }),
-                    )
-                    // Case sensitivity toggle
-                    .child(
-                        Button::new("search-case")
-                            .icon(IconName::CaseSensitive)
-                            .small()
-                            .selected(case_sensitive)
-                            .on_click(move |_ev, _window, cx| {
-                                view3.update(cx, |this, cx| {
-                                    if let Some(ref mut search) = this.search {
-                                        search.toggle_case();
-                                        search.find_matches(&this.content);
-                                        cx.notify();
-                                    }
-                                });
-                            }),
-                    )
-                    // Close button
-                    .child(
-                        Button::new("search-close")
-                            .icon(IconName::Close)
-                            .small()
-                            .on_click(move |_ev, _window, cx| {
-                                view4.update(cx, |this, cx| {
-                                    if let Some(ref mut search) = this.search {
-                                        search.is_visible = false;
-                                        cx.notify();
-                                    }
-                                });
-                            }),
-                    ),
-            )
-        } else {
-            None
         };
 
         // Clone content for the presentation closure
@@ -362,20 +182,6 @@ impl Render for AppView {
 
         v_flex()
             .size_full()
-            .on_action(cx.listener(|this, _: &ToggleSearch, window, cx| {
-                if this.mode == AppMode::Preview {
-                    this.ensure_search(window, cx);
-                    if let Some(ref mut search) = this.search {
-                        search.is_visible = !search.is_visible;
-                        if search.is_visible {
-                            search.input_state.update(cx, |state, cx| {
-                                state.focus(window, cx);
-                            });
-                        }
-                    }
-                    cx.notify();
-                }
-            }))
             // Top bar
             .child(
                 h_flex()
@@ -414,14 +220,16 @@ impl Render for AppView {
                                 move |checked, _window, cx| {
                                     view.update(cx, |this, cx| {
                                         if *checked {
-                                            // Hide search when switching to Edit mode
-                                            if let Some(ref mut search) = this.search {
-                                                search.is_visible = false;
+                                            // Hide the native WebView so it does
+                                            // not overlay the editor.
+                                            if let Some(ref wv) = this.preview_webview {
+                                                wv.update(cx, |w, _| w.hide());
                                             }
                                             this.mode = AppMode::Edit;
                                         } else {
                                             this.sync_content_from_editor(cx);
                                             this.mode = AppMode::Preview;
+                                            this.refresh_preview(cx);
                                         }
                                         cx.notify();
                                     });
@@ -450,8 +258,6 @@ impl Render for AppView {
                             }),
                     ),
             )
-            // Search bar (conditionally)
-            .children(search_bar)
             // Content area
             .child(content_area)
     }

@@ -10,12 +10,12 @@ use gpui_component::Root;
 mod app;
 mod assets;
 mod http;
-mod search;
+mod render;
 mod slidev;
 mod state;
 mod views;
 
-actions!(markzap, [OpenFile, Quit, ToggleSearch]);
+actions!(markzap, [OpenFile, Quit]);
 
 /// Convert a file:// URL string to a PathBuf.
 fn url_to_path(url: &str) -> Option<PathBuf> {
@@ -153,9 +153,6 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("cmd-o", OpenFile, None),
             KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-f", ToggleSearch, None),
-            KeyBinding::new("shift-enter", app::PrevMatch, Some("SearchBar")),
-            KeyBinding::new("escape", app::CloseSearch, Some("SearchBar")),
         ]);
 
         cx.on_action(|_: &Quit, cx| {
