@@ -1,6 +1,6 @@
 # MarkZap Test Document
 
-On va ajouter une image : ![image de moi](https://krlx.fr/profil.jpg)
+On va ajouter une image : ![image](https://krlx.fr/profil.jpg)
 
 ## Introduction
 
